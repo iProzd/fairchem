@@ -309,3 +309,17 @@ class OCPCalculator(Calculator):
             if key in OCPCalculator._reshaped_props:
                 _pred = _pred.reshape(OCPCalculator._reshaped_props.get(key)).squeeze()
             self.results[key] = _pred
+
+
+def debug_ckpt():
+    from IPython import embed
+    import sys
+    import os
+    caller_frame = sys._getframe(1)
+    file_path = os.path.abspath(caller_frame.f_code.co_filename)
+    line_no = caller_frame.f_lineno
+    caller_func_name = caller_frame.f_code.co_name
+    caller_locals = caller_frame.f_locals
+    print(f"--------{file_path.replace('/mnt/data_nas/zhangd/workplace/dev/0423_dev_arch/eSEN/', '')}:{caller_func_name}:{line_no}-------")
+    locals().update(caller_locals)
+    embed()

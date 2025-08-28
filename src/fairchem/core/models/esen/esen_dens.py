@@ -27,7 +27,7 @@ from .common.so3 import (
     SO3_Grid,
 )
 from .esen_block import eSEN_Block
-from .nn.embedding import EdgeDegreeEmbedding
+from .nn.embedding import EdgeDegreeEmbedding, ChgSpinEmbedding
 from .nn.layer_norm import (
     EquivariantLayerNormArray,
     EquivariantLayerNormArraySphericalHarmonics,
@@ -66,6 +66,9 @@ class eSEN_DeNS_Backbone(nn.Module, GraphModelMixin):
         mlp_type: str = "grid",
         use_envelope: bool = False,
         activation_checkpointing: bool = False,
+        use_cs_emb: bool = False,
+        chg_spin_emb_type: Literal["pos_emb", "lin_emb", "rand_emb"] = "pos_emb",
+        cs_emb_grad: bool = False,
     ):
         super().__init__()
 
@@ -85,6 +88,9 @@ class eSEN_DeNS_Backbone(nn.Module, GraphModelMixin):
         self.use_pbc_single = use_pbc_single
         self.enforce_max_neighbors_strictly = False
         self.activation_checkpointing = activation_checkpointing
+        self.use_cs_emb = use_cs_emb
+        self.chg_spin_emb_type = chg_spin_emb_type
+        self.cs_emb_grad = cs_emb_grad
 
         self.mlp_type = mlp_type
         self.use_envelope = use_envelope
@@ -109,6 +115,21 @@ class eSEN_DeNS_Backbone(nn.Module, GraphModelMixin):
         self.sphere_embedding = nn.Embedding(
             self.max_num_elements, self.sphere_channels
         )
+
+        # charge / spin embedding
+        self.charge_embedding = ChgSpinEmbedding(
+            self.chg_spin_emb_type,
+            "charge",
+            self.sphere_channels,
+            grad=self.cs_emb_grad,
+        )
+        self.spin_embedding = ChgSpinEmbedding(
+            self.chg_spin_emb_type,
+            "spin",
+            self.sphere_channels,
+            grad=self.cs_emb_grad,
+        )
+        self.mix_csd = nn.Linear(2 * self.sphere_channels, self.sphere_channels)
 
         # edge distance embedding
         self.cutoff = cutoff
@@ -216,6 +237,12 @@ class eSEN_DeNS_Backbone(nn.Module, GraphModelMixin):
 
         return edge_rot_mat, wigner, wigner_inv
 
+    def csd_embedding(self, charge, spin):
+        # Add charge, spin, and dataset embeddings
+        chg_emb = self.charge_embedding(charge)
+        spin_emb = self.spin_embedding(spin)
+        return torch.nn.SiLU()(self.mix_csd(torch.cat((chg_emb, spin_emb), dim=1)))
+
     def generate_graph(self, *args, **kwargs):
         graph = super().generate_graph(*args, **kwargs)
         return {
@@ -310,6 +337,14 @@ class eSEN_DeNS_Backbone(nn.Module, GraphModelMixin):
             dtype=data_dict["pos"].dtype,
         )
         x_message[:, 0, :] = self.sphere_embedding(data_dict["atomic_numbers"])
+        if self.use_cs_emb:
+            csd_mixed_emb = self.csd_embedding(
+                charge=data_dict["charge"],
+                spin=data_dict["spin"],
+            )
+
+            sys_node_embedding = csd_mixed_emb[data_dict["batch"]]
+            x_message[:, 0, :] = x_message[:, 0, :] + sys_node_embedding
 
         ##################
         ### DeNS Start ###
@@ -515,6 +550,7 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
             outputs[stress_key] = stress.view(
                 -1, 9
             )  # NOTE to work better with current Multi-task trainer
+            outputs['virial'] = virial
             data["cell"] = emb["orig_cell"]
         elif self.regress_forces:
             forces = (
